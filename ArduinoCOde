@@ -1,0 +1,217 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+// Initialize LCD at I2C address 0x27 (or 0x3F in some Tinkercad models)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// Pin Definitions
+const int TRIG_PIN = 8;
+const int ECHO_PIN = 9;
+const int LDR_PIN = A0;
+const int BUTTON_PIN = 2;
+const int LED_PIN = 3;
+const int BUZZER_PIN = 4;
+
+// Threshold Definitions
+const int DISTANCE_THRESHOLD = 100; // cm
+const int LIGHT_THRESHOLD = 512;     // Half of 1023 (10-bit ADC)
+
+// State Definitions
+enum State {
+  OPEN_SEA,
+  ANCHOR_DROPPED,
+  STORM,
+  CHARYBDIS,
+  WRECKED
+};
+
+State currentState = OPEN_SEA;
+State stateBeforeAnchor = OPEN_SEA;
+
+// Button Debouncing & Toggling
+bool anchorActive = false;
+bool lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY = 50;
+
+// Danger Timer (5 seconds continuously to get wrecked)
+unsigned long dangerStartTime = 0;
+const unsigned long DANGER_TIMEOUT = 5000;
+
+// Non-blocking LED blinking for Storm
+unsigned long lastBlinkTime = 0;
+bool ledState = LOW;
+
+void setup() {
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  lcd.init();
+  lcd.backlight();
+  updateLCD("OPEN SEA");
+}
+
+void loop() {
+  // Read Sensors
+  int lightLevel = analogRead(LDR_PIN);
+  float distance = readDistanceCM();
+
+  // Check Button State for Anchor Toggle
+  handleButton();
+
+  // Primary State Machine Logic
+  switch (currentState) {
+
+    case OPEN_SEA:
+      turnOffOutputs();
+      
+      if (anchorActive) {
+        stateBeforeAnchor = OPEN_SEA;
+        currentState = ANCHOR_DROPPED;
+        updateLCD("ANCHOR DROPPED");
+      }
+      else if (lightLevel < LIGHT_THRESHOLD) {
+        currentState = STORM;
+        dangerStartTime = millis();
+        updateLCD("STORM");
+      }
+      else if (distance < DISTANCE_THRESHOLD && distance > 0) {
+        currentState = CHARYBDIS;
+        dangerStartTime = millis();
+        updateLCD("CHARYBDIS");
+      }
+      break;
+
+    case STORM:
+      // Storm Behavior: Blink LED
+      blinkLED(300);
+      noTone(BUZZER_PIN);
+
+      if (anchorActive) {
+        stateBeforeAnchor = STORM;
+        currentState = ANCHOR_DROPPED;
+        updateLCD("ANCHOR DROPPED");
+      }
+      else if (millis() - dangerStartTime >= DANGER_TIMEOUT) {
+        currentState = WRECKED;
+        updateLCD("WRECKED");
+      }
+      else if (lightLevel >= LIGHT_THRESHOLD) {
+        // Escaped storm before 5s
+        currentState = OPEN_SEA;
+        updateLCD("OPEN SEA");
+      }
+      break;
+
+    case CHARYBDIS:
+      // Charybdis Behavior: Sound Buzzer
+      digitalWrite(LED_PIN, LOW);
+      tone(BUZZER_PIN, 440); // 440 Hz tone
+
+      if (anchorActive) {
+        stateBeforeAnchor = CHARYBDIS;
+        currentState = ANCHOR_DROPPED;
+        updateLCD("ANCHOR DROPPED");
+      }
+      else if (millis() - dangerStartTime >= DANGER_TIMEOUT) {
+        currentState = WRECKED;
+        updateLCD("WRECKED");
+      }
+      else if (distance >= DISTANCE_THRESHOLD || distance == 0) {
+        // Escaped Charybdis before 5s
+        currentState = OPEN_SEA;
+        updateLCD("OPEN SEA");
+      }
+      break;
+
+    case ANCHOR_DROPPED:
+      turnOffOutputs();
+
+      // Protected while anchor is down. If unanchored:
+      if (!anchorActive) {
+        // Check if conditions are still dangerous upon raising anchor
+        if (lightLevel < LIGHT_THRESHOLD) {
+          currentState = STORM;
+          dangerStartTime = millis(); // Reset 5s timer on re-entry
+          updateLCD("STORM");
+        }
+        else if (distance < DISTANCE_THRESHOLD && distance > 0) {
+          currentState = CHARYBDIS;
+          dangerStartTime = millis(); // Reset 5s timer on re-entry
+          updateLCD("CHARYBDIS");
+        }
+        else {
+          currentState = OPEN_SEA;
+          updateLCD("OPEN SEA");
+        }
+      }
+      break;
+
+    case WRECKED:
+      // Permanent State: Turn on both indicators permanently or lock up
+      digitalWrite(LED_PIN, HIGH);
+      tone(BUZZER_PIN, 150);
+      // Remained wrecked until simulation reset
+      break;
+  }
+}
+
+// Helper: Measure distance from Ultrasonic Sensor
+float readDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout
+  if (duration == 0) return 999.0; // Return out-of-range value
+  return duration * 0.0343 / 2.0;
+}
+
+// Helper: Handle Button Push with Debounce
+void handleButton() {
+  int reading = digitalRead(BUTTON_PIN);
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+    static bool buttonState = HIGH;
+    if (reading != buttonState) {
+      buttonState = reading;
+      // Trigger on press (LOW for INPUT_PULLUP)
+      if (buttonState == LOW && currentState != WRECKED) {
+        anchorActive = !anchorActive;
+      }
+    }
+  }
+  lastButtonState = reading;
+}
+
+// Helper: Non-blocking LED Blink
+void blinkLED(int interval) {
+  if (millis() - lastBlinkTime >= interval) {
+    lastBlinkTime = millis();
+    ledState = !ledState;
+    digitalWrite(LED_PIN, ledState);
+  }
+}
+
+// Helper: Reset Outputs
+void turnOffOutputs() {
+  digitalWrite(LED_PIN, LOW);
+  noTone(BUZZER_PIN);
+}
+
+// Helper: Update LCD Line 1
+void updateLCD(String stateName) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("State:");
+  lcd.setCursor(0, 1);
+  lcd.print(stateName);
+}
